@@ -28,6 +28,7 @@ jobs:
           security unlock-keychain -p password build.keychain
           security import certificate.p12 -k build.keychain -P $MACOS_SIGNING_KEY_PASSWORD -T /usr/bin/codesign
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k password build.keychain
+          security set-keychain-settings -lut 3600 build.keychain
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
@@ -103,6 +104,7 @@ jobs:
           path: |
             llm/build/**/bin/*
             llm/build/**/*.a
+            dist/windows-amd64/**
 
   # ROCm generation step
   generate-windows-rocm:
@@ -173,7 +175,9 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: generate-windows-rocm
-          path: llm/build/**/bin/*
+          path: |
+            llm/build/**/bin/*
+            dist/windows-amd64/**
       - uses: actions/upload-artifact@v4
         with:
           name: windows-rocm-deps
@@ -253,7 +257,9 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: generate-windows-cuda
-          path: llm/build/**/bin/*
+          path: |
+            llm/build/**/bin/*
+            dist/windows-amd64/**
       - uses: actions/upload-artifact@v4
         with:
           name: windows-cuda-deps
@@ -298,6 +304,11 @@ jobs:
           write-host "Installing plugin"
           & "${env:RUNNER_TEMP}\plugin\*\kmscng.msi" /quiet
           write-host "plugin installed"
+      - name: remove unwanted mingw dll.a files
+        run: |
+          Get-ChildItem -Path "C:\mingw64" -Recurse -Filter "libpthread.dll.a" -File | Remove-Item -Force
+          Get-ChildItem -Path "C:\mingw64" -Recurse -Filter "libwinpthread.dll.a" -File | Remove-Item -Force
+          Get-ChildItem -Path "C:\mingw64" -Recurse -Filter "libstdc++.dll.a" -File | Remove-Item -Force
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
@@ -306,23 +317,18 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: generate-windows-cpu
-          path: llm/build
       - uses: actions/download-artifact@v4
         with:
           name: generate-windows-cuda
-          path: llm/build
       - uses: actions/download-artifact@v4
         with:
           name: windows-cuda-deps
-          path: dist/deps
       - uses: actions/download-artifact@v4
         with:
           name: windows-rocm-deps
-          path: dist/deps
       - uses: actions/download-artifact@v4
         with:
           name: generate-windows-rocm
-          path: llm/build
       - run: dir llm/build
       - run: |
           $gopath=(get-command go).source | split-path -parent
@@ -331,13 +337,13 @@ jobs:
           $env:CMAKE_SYSTEM_VERSION="10.0.22621.0"
           $env:PATH="$gopath;$env:PATH"
           $env:OLLAMA_SKIP_GENERATE="1"
-          $env:NVIDIA_DIR=$(resolve-path ".\dist\deps")
-          $env:HIP_PATH=$(resolve-path ".\dist\deps")
           & .\scripts\build_windows.ps1
       - uses: actions/upload-artifact@v4
         with:
           name: dist-windows
-          path: dist/*.exe
+          path: |
+            dist/OllamaSetup.exe
+            dist/ollama-windows-*.zip
 
   # Linux x86 assets built using the container based build
   build-linux-amd64:
@@ -436,6 +442,7 @@ jobs:
     env:
       OLLAMA_SKIP_IMAGE_BUILD: '1'
       PUSH: '1'
+      GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v4
       - name: Set Version
@@ -459,15 +466,20 @@ jobs:
           ls -lh dist/
           (cd dist; sha256sum * > sha256sum.txt)
           cat dist/sha256sum.txt
-      - uses: ncipollo/release-action@v1
-        with:
-          name: ${{ env.RELEASE_VERSION }}
-          allowUpdates: true
-          artifacts: 'dist/*'
-          draft: true
-          prerelease: true
-          omitBodyDuringUpdate: true
-          generateReleaseNotes: true
-          omitDraftDuringUpdate: true
-          omitPrereleaseDuringUpdate: true
-          replacesArtifacts: true
+      - name: Create or update Release
+        run: |
+          echo "Looking for existing release for ${{ env.RELEASE_VERSION }}"
+          OLD_TAG=$(gh release ls --json name,tagName | jq -r ".[] | select(.name == \"${{ env.RELEASE_VERSION }}\") | .tagName")
+          if [ -n "$OLD_TAG" ]; then
+            echo "Updating release ${{ env.RELEASE_VERSION }} to point to new tag ${GITHUB_REF_NAME}"
+            gh release edit ${OLD_TAG} --tag ${GITHUB_REF_NAME}
+          else
+            echo "Creating new release ${{ env.RELEASE_VERSION }} pointing to tag ${GITHUB_REF_NAME}"
+            gh release create ${GITHUB_REF_NAME} \
+              --title ${{ env.RELEASE_VERSION }} \
+              --draft \
+              --generate-notes \
+              --prerelease
+          fi
+          echo "Uploading artifacts for tag ${GITHUB_REF_NAME}"
+          gh release upload ${GITHUB_REF_NAME} dist/* --clobber

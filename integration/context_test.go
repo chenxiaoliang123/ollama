@@ -4,7 +4,6 @@ package integration
 
 import (
 	"context"
-	"net/http"
 	"testing"
 	"time"
 
@@ -12,7 +11,8 @@ import (
 )
 
 func TestContextExhaustion(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute) // TODO maybe shorter?
+	// Longer needed for small footprint GPUs
+	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
 	defer cancel()
 	// Set up the test data
 	req := api.GenerateRequest{
@@ -25,5 +25,5 @@ func TestContextExhaustion(t *testing.T) {
 			"num_ctx":     128,
 		},
 	}
-	GenerateTestHelper(ctx, t, &http.Client{}, req, []string{"once", "upon", "lived"})
+	GenerateTestHelper(ctx, t, req, []string{"once", "upon", "lived"})
 }

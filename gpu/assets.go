@@ -12,6 +12,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/ollama/ollama/envconfig"
 )
 
 var (
@@ -24,8 +26,16 @@ func PayloadsDir() (string, error) {
 	defer lock.Unlock()
 	var err error
 	if payloadsDir == "" {
+		runnersDir := envconfig.RunnersDir
+
+		if runnersDir != "" {
+			payloadsDir = runnersDir
+			return payloadsDir, nil
+		}
+
+		// The remainder only applies on non-windows where we still carry payloads in the main executable
 		cleanupTmpDirs()
-		tmpDir := os.Getenv("OLLAMA_TMPDIR")
+		tmpDir := envconfig.TmpDir
 		if tmpDir == "" {
 			tmpDir, err = os.MkdirTemp("", "ollama")
 			if err != nil {
@@ -67,20 +77,27 @@ func cleanupTmpDirs() {
 			continue
 		}
 		raw, err := os.ReadFile(filepath.Join(d, "ollama.pid"))
-		if err == nil {
-			pid, err := strconv.Atoi(string(raw))
-			if err == nil {
-				if proc, err := os.FindProcess(int(pid)); err == nil && !errors.Is(proc.Signal(syscall.Signal(0)), os.ErrProcessDone) {
-					// Another running ollama, ignore this tmpdir
-					continue
-				}
-			}
-		} else {
-			slog.Debug("failed to open ollama.pid", "path", d, "error", err)
-		}
-		err = os.RemoveAll(d)
 		if err != nil {
-			slog.Debug(fmt.Sprintf("unable to cleanup stale tmpdir %s: %s", d, err))
+			slog.Warn("failed to read ollama.pid", "path", d, "error", err)
+			// No pid, ignore this tmpdir
+			continue
+		}
+
+		pid, err := strconv.Atoi(string(raw))
+		if err != nil {
+			slog.Warn("failed to parse pid", "path", d, "error", err)
+			continue
+		}
+
+		proc, err := os.FindProcess(pid)
+		if err == nil && !errors.Is(proc.Signal(syscall.Signal(0)), os.ErrProcessDone) {
+			slog.Warn("found running ollama", "pid", pid, "path", d)
+			// Another running ollama, ignore this tmpdir
+			continue
+		}
+
+		if err := os.Remove(d); err != nil {
+			slog.Warn("unable to cleanup stale tmpdir", "path", d, "error", err)
 		}
 	}
 }
@@ -88,7 +105,8 @@ func cleanupTmpDirs() {
 func Cleanup() {
 	lock.Lock()
 	defer lock.Unlock()
-	if payloadsDir != "" {
+	runnersDir := envconfig.RunnersDir
+	if payloadsDir != "" && runnersDir == "" && runtime.GOOS != "windows" {
 		// We want to fully clean up the tmpdir parent of the payloads dir
 		tmpDir := filepath.Clean(filepath.Join(payloadsDir, ".."))
 		slog.Debug("cleaning up", "dir", tmpDir)
@@ -120,7 +138,7 @@ func UpdatePath(dir string) {
 			}
 		}
 		newPath := strings.Join(append([]string{dir}, pathComponents...), ";")
-		slog.Info(fmt.Sprintf("Updating PATH to %s", newPath))
+		slog.Info("updating", "PATH", newPath)
 		os.Setenv("PATH", newPath)
 	}
 	// linux and darwin rely on rpath

@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -17,20 +18,36 @@ import (
 	"github.com/ollama/ollama/llm"
 )
 
+const (
+	_ int32 = iota
+	tokenTypeNormal
+	tokenTypeUnknown
+	tokenTypeControl
+	tokenTypeUserDefined
+	tokenTypeUnused
+	tokenTypeByte
+)
+
 type Params struct {
-	Architectures    []string `json:"architectures"`
-	VocabSize        int      `json:"vocab_size"`
-	HiddenSize       int      `json:"hidden_size"`       // n_embd
-	HiddenLayers     int      `json:"num_hidden_layers"` // n_layer
-	ContextSize      int      `json:"max_position_embeddings"`
-	IntermediateSize int      `json:"intermediate_size"`
-	AttentionHeads   int      `json:"num_attention_heads"` // n_head
-	KeyValHeads      int      `json:"num_key_value_heads"`
-	NormEPS          float64  `json:"rms_norm_eps"`
-	BoSTokenID       int      `json:"bos_token_id"`
-	EoSTokenID       int      `json:"eos_token_id"`
-	HeadDimension    int      `json:"head_dim"`
-	PaddingTokenID   int      `json:"pad_token_id"`
+	Architectures     []string `json:"architectures"`
+	VocabSize         int      `json:"vocab_size"`
+	HiddenSize        int      `json:"hidden_size"`       // n_embd
+	HiddenLayers      int      `json:"num_hidden_layers"` // n_layer
+	ContextSize       int      `json:"max_position_embeddings"`
+	IntermediateSize  int      `json:"intermediate_size"`
+	AttentionHeads    int      `json:"num_attention_heads"` // n_head
+	KeyValHeads       int      `json:"num_key_value_heads"`
+	NormEPS           float64  `json:"rms_norm_eps"`
+	BoSTokenID        int      `json:"bos_token_id"`
+	EoSTokenID        int      `json:"eos_token_id"`
+	HeadDimension     int      `json:"head_dim"`
+	PaddingTokenID    int      `json:"pad_token_id"`
+	RopeFrequencyBase float64  `json:"rope_theta"`
+
+	Experts     int `json:"num_local_experts"`
+	ExpertsUsed int `json:"num_experts_per_tok"`
+
+	PreTokenizer string
 
 	ByteOrder
 }
@@ -43,7 +60,7 @@ type ByteOrder interface {
 type ModelArch interface {
 	GetTensors() error
 	LoadVocab() error
-	WriteGGUF() (string, error)
+	WriteGGUF(io.WriteSeeker) error
 }
 
 type ModelFormat interface {
@@ -69,10 +86,9 @@ func GetModelFormat(dirname string) (ModelFormat, error) {
 	}
 
 	for _, fn := range files {
-		slog.Debug(fmt.Sprintf("file = %s", fn))
 		if strings.HasSuffix(fn, ".safetensors") {
 			return &SafetensorFormat{}, nil
-		} else if strings.HasSuffix(fn, ".bin") {
+		} else if strings.HasSuffix(fn, ".bin") || strings.HasSuffix(fn, ".pth") {
 			slog.Debug("model is torch")
 			return &TorchFormat{}, nil
 		}
@@ -87,6 +103,7 @@ type Vocab struct {
 	Tokens []string
 	Scores []float32
 	Types  []int32
+	Merges []string
 }
 
 func LoadSentencePieceTokens(dirpath string, params *Params) (*Vocab, error) {
@@ -165,17 +182,17 @@ func LoadSentencePieceTokens(dirpath string, params *Params) (*Vocab, error) {
 		}
 		v.Tokens = append(v.Tokens, t.key)
 		v.Scores = append(v.Scores, -1000.0)
-		v.Types = append(v.Types, int32(llm.GGUFTokenUserDefined))
+		v.Types = append(v.Types, tokenTypeUserDefined)
 	}
 	slog.Info(fmt.Sprintf("vocab size w/ extra tokens: %d", len(v.Tokens)))
 
 	if params.VocabSize > len(v.Tokens) {
 		missingTokens := params.VocabSize - len(v.Tokens)
 		slog.Warn(fmt.Sprintf("vocab is missing %d tokens", missingTokens))
-		for cnt := 0; cnt < missingTokens; cnt++ {
+		for cnt := range missingTokens {
 			v.Tokens = append(v.Tokens, fmt.Sprintf("<dummy%05d>", cnt+1))
 			v.Scores = append(v.Scores, -1)
-			v.Types = append(v.Types, int32(llm.GGUFTokenUserDefined))
+			v.Types = append(v.Types, tokenTypeUserDefined)
 		}
 	}
 
